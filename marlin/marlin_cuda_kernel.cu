@@ -244,22 +244,36 @@ __global__ void Marlin(
   }
 
   // Compute all information about the current slice which is required for synchronization.
+  //Marlin采用了split-k的逻辑，一个输出 C tiles可能需要多个thread block 参与。
+  //在thread block level面向weight tiles进行调度，每个thread block沿着k维度处理连续多个tiles
+  //一个slice对应一个thread block在该列所需要处理的tiles(tile_k * tile_n), 
+  //每个slice处理的tiles的数量 <=iters， 如果thread block没有跨 C tiles，slice处理的tiles刚好是 iters
+  //否则小于iters
   auto init_slice = [&] () {
+    //当前slice处理的 tile 数量, 一个thread block处理的tiles可能会跨多个C输出tiles，因此会切分成多个slice
     slice_iters = iters * (blockIdx.x + 1) - (k_tiles * slice_col_par + slice_row);
     if (slice_iters < 0 || slice_col_par >= n_tiles * parallel)
       slice_iters = 0;
     if (slice_iters == 0)
       return;
+    //当前thread block可能会跨 C tile, 处理当前thread block对应的第一个 C tile
     if (slice_row + slice_iters > k_tiles) 
       slice_iters = k_tiles - slice_row;
     slice_count = 1;
     slice_idx = 0;
+    //当前col之前所有k列包含的thread blocks的个数，如果刚好被iters整除则最后thread block并没有跨 C tiles
+    //否则当前行则有一部分tiles是前一个thread blocks处理的，这些tiles会被当做一个slice
     int col_first = iters * ceildiv(k_tiles * slice_col_par, iters);
+    //该slice落在当前列
     if (col_first <= k_tiles * (slice_col_par + 1)) {
+      //当前col的第一个slice的偏移量
       int col_off = col_first - k_tiles * slice_col_par;
+      //该列对应的输出 C tiles需要 slice_count 个thread block 处理，因此需要引入global parallel reduction.
       slice_count = ceildiv(k_tiles - col_off, iters);
       if (col_off > 0)
         slice_count++;
+      //如何找到当前slice的id信息？
+      //第一个slice之前共处理了col_first tiles, 当前thread block之前处理了 iters*blockIdx.x
       int delta_first = iters * blockIdx.x - col_first;
       if (delta_first < 0 || (col_off == 0 && delta_first == 0))
         slice_idx = slice_count - 1;
@@ -390,7 +404,7 @@ __global__ void Marlin(
       #pragma unroll
       for (int i = 0; i < a_sh_wr_iters; i++) {
         cp_async4_pred(
-          &sh_a_stage[a_sh_wr_trans[i]],
+          &sh_a_stage[a_sh_wr_trans[i]],  
           &A[a_gl_rd_delta_i * i + a_gl_rd + a_gl_rd_delta_o * a_off],
           a_sh_wr_pred[i]
         );
