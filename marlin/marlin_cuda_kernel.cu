@@ -632,14 +632,18 @@ __global__ void Marlin(
   };
 
   // Start global fetch and register load pipelines. 
+  // 保留一个stage smem为空作为下次load的dest
   auto start_pipes = [&] () {
     #pragma unroll
     for (int i = 0; i < stages - 1; i++)
       fetch_to_shared(i, i, i < slice_iters);
     zero_accums();
+    //异步拷贝同步操作，asyc_cp_wait(stages-2)
+    //保证离最后一个asyc request最近stage-2为active/pending, 这stage-2个gmem load 可以跟 smem load or math计算重合。 再往前的asyc需要load结束
+    //这里 stages 为4， asyc_cp_wait(stages-2) 确保 1/2 is pending, 0 is finished. 这样就可以先开始 smem->RF 
     wait_for_stage();
     fetch_to_registers(0, 0);
-    a_gl_rd += a_gl_rd_delta_o * (stages - 1);
+    a_gl_rd += a_gl_rd_delta_o * (stages - 1); //前面stages-1个tile已经触发global load, 需要修改此时a的全局指向指针
   };
   start_pipes();
 
@@ -647,11 +651,17 @@ __global__ void Marlin(
   while (slice_iters) {
     // We unroll over both the global fetch and the register load pipeline to ensure all shared memory accesses are
     // static. Note that both pipelines have even length meaning that the next iteration will always start at index 0.
+    /******************************Marlin Software Pipeline****************************************/
+    /* 
+    /*
     #pragma unroll
     for (int pipe = 0; pipe < stages;) {
       #pragma unroll
       for (int k = 0; k < b_sh_wr_iters; k++) {
+        //第k个sub-tile 的matmul计算与第k+1个sub_tile 的 smem->RF的load overlap
         fetch_to_registers(k + 1, pipe % stages);
+        //在计算倒数第二个sub-tile时 load的是最后一个sub-tile的 smem的数据
+        //最后一个sub-tile计算时需要从下一个tile（pipe）的smem buffer load数据，因此需要保证当前pipe的下一个pipe的global memory load是完成的
         if (k == b_sh_wr_iters - 2) {
           fetch_to_shared((pipe + stages - 1) % stages, pipe, slice_iters >= stages);
           pipe++;
