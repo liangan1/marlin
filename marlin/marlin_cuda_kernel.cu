@@ -491,16 +491,16 @@ __global__ void Marlin(
       #pragma unroll
       for (int m_block = 0; m_block < thread_m_blocks; m_block++) {
         #pragma unroll
-        for (int i = red_off; i > 0; i /= 2) {
+        for (int i = red_off; i > 0; i /= 2) {//对数reduction，后一半的red_idx以red_off的步长往前一半的red_idx reduce，每一轮reduce后参与的线程数少一半 
           if (i <= red_idx && red_idx < 2 * i) {
             #pragma unroll
-            for (int j = 0; j < 4 * 2; j++) {
+            for (int j = 0; j < 4 * 2; j++) {//每个warp计算 16*64的weight，每个mma:m16n8k16, 所以共有(16*8)*2*4)--> 4*2=8个mma，每个线程的frag_c包括 4 float
               int red_sh_wr = red_sh_delta * j + (red_sh_rd - red_sh_stride * i);
               if (i < red_off) {
                 float* c_rd = reinterpret_cast<float*>(&sh[red_sh_delta * j + red_sh_rd]);
                 float* c_wr = reinterpret_cast<float*>(&sh[red_sh_wr]);
                 #pragma unroll
-                for (int k = 0; k < 4; k++)
+                for (int k = 0; k < 4; k++)//每个线程的frag_c包括 4 float
                   reinterpret_cast<FragC*>(frag_c)[4 * 2 * m_block + j][k] += c_rd[k] + c_wr[k];
               }
               sh[red_sh_wr] = reinterpret_cast<int4*>(&frag_c)[4 * 2 * m_block + j];
